@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Checker queue · MedScan{% endblock %}
+{% block page_title %}Checker queue{% endblock %}
+{% block page_subtitle %}Review Maker-submitted batches and sign off before they enter the central system{% endblock %}
+{% block content %}
+<section class="grid four" id="queueMetrics"></section>
+<section class="card" style="margin-top:15px"><div class="section-head"><div><h2>Waiting for your review</h2><p>Newest submissions appear first. Each item represents one complete multi-PDF batch.</p></div><button class="btn" onclick="loadQueue()">Refresh queue</button></div><div class="queue-list" id="queue"><div class="empty">Loading approvals…</div></div></section>
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadQueue(){try{const d=await api("/api/checker/queue"),items=d.items||[],docs=items.reduce((n,x)=>n+Number(x.document_count||0),0),lines=items.reduce((n,x)=>n+Number(x.line_count||0),0),reviews=items.reduce((n,x)=>n+Number(x.review_count||0),0);document.getElementById("queueMetrics").innerHTML=`<div class="card metric amber"><div class="kicker">Awaiting approval</div><div class="value">${items.length}</div><div class="hint">Maker-submitted batches</div></div><div class="card metric"><div class="kicker">Invoices</div><div class="value">${docs}</div><div class="hint">Across the queue</div></div><div class="card metric"><div class="kicker">Medicine lines</div><div class="value">${lines}</div><div class="hint">Ready to verify</div></div><div class="card metric ${reviews?"red":"green"}"><div class="kicker">Flagged lines</div><div class="value">${reviews}</div><div class="hint">Require closer attention</div></div>`;document.getElementById("queue").innerHTML=items.length?items.map(x=>`<a class="queue-item" href="${BASE}/checker/batch/${x.public_id}"><div><b>${x.document_count} invoice${x.document_count===1?"":"s"} from ${esc(x.maker_name)}</b><small>Submitted ${new Date(x.submitted_at).toLocaleString("en-IN")}</small></div><div><span class="label">Medicine lines</span><b>${x.line_count}</b></div><div><span class="label">Needs review</span><b>${x.review_count}</b></div><div><span class="label">OCR value</span><b>${money(x.ocr_total)}</b></div><button class="btn primary">Open batch</button></a>`).join(""):'<div class="empty"><b>Queue is clear</b><br><br>New Maker submissions will appear here automatically.</div>'}catch(e){toast(e.message,true)}}loadQueue();setInterval(loadQueue,10000);
+</script>
+{% endblock %}

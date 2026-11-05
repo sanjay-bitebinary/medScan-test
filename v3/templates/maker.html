@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Maker workspace · MedScan{% endblock %}
+{% block page_title %}Maker workspace{% endblock %}
+{% block page_subtitle %}Upload a batch of purchase invoices, review every medicine, then hand it to the Checker{% endblock %}
+{% block content %}
+<section class="card upload-card">
+  <div class="upload-copy">
+    <span class="chip info">Step 1 · Capture</span>
+    <h2>Drop all purchase invoices here</h2>
+    <p>Upload up to 10 PDFs together. MedScan keeps each invoice separate and builds one review batch.</p>
+    <div class="upload-notes"><span>PDF only</span><span>50 MB per file</span><span>Sequential secure scanning</span></div>
+  </div>
+  <label class="dropzone" id="dropzone">
+    <input id="files" type="file" accept="application/pdf,.pdf" multiple hidden>
+    <span class="drop-icon">+</span>
+    <b>Choose PDFs or drag them here</b>
+    <small id="fileHint">Multiple files supported</small>
+  </label>
+  <div id="selection" class="selection"></div>
+  <button class="btn primary scan-action" id="scan" disabled>Scan selected invoices</button>
+</section>
+<section class="grid three feature-grid">
+  <div class="card feature"><b>1</b><div><strong>Capture accurately</strong><p>Selectable PDFs and image scans follow the right reading path automatically.</p></div></div>
+  <div class="card feature"><b>2</b><div><strong>Review as one batch</strong><p>Each filename, vendor, medicine line and total remains clearly separated.</p></div></div>
+  <div class="card feature"><b>3</b><div><strong>Verified handoff</strong><p>Save once to send the complete batch into the Checker’s approval queue.</p></div></div>
+</section>
+{% endblock %}
+{% block head %}
+<style>
+.upload-card{min-height:420px;display:grid;grid-template-columns:minmax(260px,.8fr) minmax(420px,1.2fr);grid-template-rows:1fr auto;gap:20px;padding:28px;background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(238,249,250,.96))}
+.upload-copy{align-self:center;padding:12px}.upload-copy h2{margin:18px 0 10px;max-width:430px;color:var(--navy);font-size:32px;line-height:1.08;letter-spacing:-1px}.upload-copy p{max-width:460px;color:var(--muted);font-size:14px;line-height:1.65}.upload-notes{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}.upload-notes span{padding:6px 9px;border-radius:8px;background:#edf5f8;color:#51687c;font-size:10px;font-weight:750}
+.dropzone{min-height:270px;display:flex;flex-direction:column;align-items:center;justify-content:center;border:2px dashed #a9c7d6;border-radius:22px;background:radial-gradient(circle at 50% 0,rgba(40,100,220,.08),transparent 58%),#fbfdfe;cursor:pointer;transition:.2s}.dropzone:hover,.dropzone.over{border-color:var(--blue);background:#f3f8ff;transform:translateY(-2px)}.drop-icon{display:grid;place-items:center;width:64px;height:64px;margin-bottom:17px;border-radius:20px;background:linear-gradient(145deg,var(--blue),var(--teal));color:#fff;font-size:32px;box-shadow:0 14px 30px rgba(40,100,220,.22)}.dropzone b{font-size:15px;color:var(--navy)}.dropzone small{margin-top:7px;color:var(--muted);font-size:11px}.selection{grid-column:1/-1;display:flex;gap:7px;flex-wrap:wrap}.file-pill{display:flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:#fff;color:#4b6075;font-size:10px;font-weight:750}.scan-action{grid-column:1/-1;justify-self:end;min-width:220px}.three{grid-template-columns:repeat(3,minmax(0,1fr))}.feature-grid{margin-top:15px}.feature{display:flex;gap:14px;align-items:flex-start}.feature>b{display:grid;place-items:center;flex:0 0 34px;width:34px;height:34px;border-radius:11px;background:#e6f0ff;color:var(--blue)}.feature strong{font-size:13px;color:var(--navy)}.feature p{margin:5px 0 0;color:var(--muted);font-size:11px;line-height:1.5}
+@media(max-width:900px){.upload-card{grid-template-columns:1fr}.upload-copy h2{font-size:27px}.three{grid-template-columns:1fr}}
+</style>
+{% endblock %}
+{% block scripts %}
+<script>
+const picker=document.getElementById("files"),drop=document.getElementById("dropzone"),scan=document.getElementById("scan"),selection=document.getElementById("selection");
+let chosen=[];
+function renderFiles(){selection.innerHTML=chosen.map((f,i)=>`<span class="file-pill">PDF ${i+1} · ${esc(f.name)} · ${(f.size/1048576).toFixed(1)} MB</span>`).join("");document.getElementById("fileHint").textContent=chosen.length?`${chosen.length} invoice${chosen.length===1?"":"s"} selected`:"Multiple files supported";scan.disabled=!chosen.length}
+function accept(files){chosen=[...files].filter(f=>f.name.toLowerCase().endsWith(".pdf")).slice(0,10);renderFiles()}
+picker.onchange=()=>accept(picker.files);drop.ondragover=e=>{e.preventDefault();drop.classList.add("over")};drop.ondragleave=()=>drop.classList.remove("over");drop.ondrop=e=>{e.preventDefault();drop.classList.remove("over");accept(e.dataTransfer.files)};
+scan.onclick=async()=>{if(!chosen.length)return;scan.disabled=true;scan.textContent="Creating secure batch…";const body=new FormData();chosen.forEach(f=>body.append("files",f));try{const data=await api("/api/batches",{method:"POST",body});location.href=data.redirect}catch(error){toast(error.message,true);scan.disabled=false;scan.textContent="Scan selected invoices"}};
+</script>
+{% endblock %}

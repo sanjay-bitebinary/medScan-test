@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+runtime/
+.cache/
+*.out
+*.err
+screenshots/
+backups/
+.env

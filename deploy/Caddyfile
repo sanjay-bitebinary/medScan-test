@@ -1,0 +1,19 @@
+ocr.tryaisoft.com {
+    encode gzip
+
+    @v3root path /v3
+    redir @v3root /v3/ 308
+    handle_path /v3/* {
+        reverse_proxy medscan-v3-app:5003
+    }
+
+    @v2root path /v2
+    redir @v2root /v2/ 308
+    handle_path /v2/* {
+        reverse_proxy app-v2:5002
+    }
+
+    handle {
+        reverse_proxy app:5001
+    }
+}

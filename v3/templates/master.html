@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Medicine master · MedScan{% endblock %}
+{% block page_title %}Medicine master{% endblock %}
+{% block page_subtitle %}The authoritative drug_names.xls catalogue used for every medicine match{% endblock %}
+{% block content %}
+<section class="card"><div class="section-head"><div><h2>Master medicine database</h2><p>All scan matching and Maker mapping use this master list—not an AI guess.</p></div><div class="controls"><input class="input" id="masterSearch" placeholder="Search medicine name"><button class="btn" onclick="loadMaster()">Search</button></div></div><div class="table-wrap tall"><table><thead><tr><th>Medicine name</th><th>Master spelling</th><th>Strength</th><th>Form</th><th>Pack</th></tr></thead><tbody id="masterRows"><tr><td colspan="5" class="empty">Loading medicine master…</td></tr></tbody></table></div></section>
+{% endblock %}
+{% block scripts %}<script>
+async function loadMaster(){try{const q=document.getElementById("masterSearch").value.trim(),d=await api("/api/master?q="+encodeURIComponent(q));document.getElementById("masterRows").innerHTML=(d.entries||[]).map(x=>`<tr><td class="strong">${esc(x.canonical_name||"—")}</td><td class="wrap">${esc(x.catalog_name||"—")}</td><td>${esc(x.strength||"—")}</td><td>${esc(x.form||"—")}</td><td>${esc(x.pack||"—")}</td></tr>`).join("")||'<tr><td colspan="5" class="empty">No medicine matched this search.</td></tr>'}catch(e){toast(e.message,true)}}document.getElementById("masterSearch").onkeydown=e=>{if(e.key==="Enter")loadMaster()};loadMaster();
+</script>{% endblock %}

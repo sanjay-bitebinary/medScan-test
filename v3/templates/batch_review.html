@@ -1,0 +1,712 @@
+{% extends "base.html" %}
+{% block title %}Review batch · MedScan{% endblock %}
+{% block page_title %}Review extracted invoices{% endblock %}
+{% block page_subtitle %}Correct medicine details inline, reconcile each PDF, then save the batch to the Checker{% endblock %}
+{% block content %}
+<div id="batchRoot">
+  <section class="card" id="progressCard">
+    <div class="section-head">
+      <div>
+        <h2>Scanning {{ batch.documents|length }} invoice{{ '' if batch.documents|length==1 else 's' }}</h2>
+        <p id="progressText">Preparing the first invoice…</p>
+      </div>
+      <b id="progressValue">{{ batch.progress }}%</b>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill" style="width:{{ batch.progress }}%"></div>
+    </div>
+  </section>
+  <div id="summary"></div>
+  <div id="documents"></div>
+</div>
+
+<div class="modal" id="submitModal">
+  <div class="dialog">
+    <div class="dialog-head">
+      <h3>Save this batch and submit it to the Checker?</h3>
+      <p>Maker edits will lock after this handoff. The central system updates only after Checker approval.</p>
+    </div>
+    <div class="dialog-body"><div id="submitPreview"></div></div>
+    <div class="dialog-actions">
+      <button class="btn" type="button" onclick="closeSubmit()">Continue review</button>
+      <button class="btn primary" type="button" id="confirmSubmit">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="review-overlay" id="sourcePanel" role="dialog" aria-modal="true" aria-label="Invoice source review">
+  <div class="source-dialog">
+    <div class="source-head">
+      <div>
+        <h3 id="sourceTitle">Invoice source</h3>
+        <p id="sourceSubtitle">Compare the extracted row with its original page.</p>
+      </div>
+      <div class="source-controls">
+        <button type="button" id="zoomOutBtn">−</button>
+        <span id="zoomLabel">100%</span>
+        <button type="button" id="zoomInBtn">＋</button>
+        <button type="button" id="sourceCloseBtn">Close</button>
+      </div>
+    </div>
+    <div class="source-scroll">
+      <div class="source-canvas" id="sourceCanvas">
+        <img id="sourceImage" alt="Original invoice page">
+        <div class="source-highlight" id="sourceHighlight"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="review-overlay" id="catalogPanel" role="dialog" aria-modal="true" aria-labelledby="catalogDialogTitle">
+  <div class="catalog-dialog">
+    <div class="catalog-dialog-head">
+      <h3 id="catalogDialogTitle">Add medicine to the master list?</h3>
+      <p>Check these details before adding the medicine. The current row will be rematched immediately.</p>
+    </div>
+    <div class="catalog-preview" id="catalogPreview"></div>
+    <div class="catalog-dialog-actions">
+      <button type="button" id="catalogCancelBtn">Cancel</button>
+      <button type="button" class="confirm" id="catalogConfirmBtn">OK, add medicine</button>
+    </div>
+  </div>
+</div>
+
+<div class="review-overlay" id="resolvePanel" role="dialog" aria-modal="true" aria-labelledby="resolveDialogTitle">
+  <div class="catalog-dialog">
+    <div class="catalog-dialog-head">
+      <h3 id="resolveDialogTitle">Resolve medicine review</h3>
+      <p>Map the OCR result to an existing master medicine, or record that you checked this line and it is acceptable.</p>
+    </div>
+    <div class="catalog-preview">
+      <div class="catalog-preview-item wide"><span>Raw OCR text</span><b id="resolveRaw"></b></div>
+      <label class="field" style="display:block;margin-top:13px"><span class="label">Map to medicine master</span><input class="input" id="resolveName" list="resolveSuggestions" autocomplete="off" placeholder="Start typing a medicine from the master list"><datalist id="resolveSuggestions"></datalist></label>
+    </div>
+    <div class="catalog-dialog-actions">
+      <button type="button" id="resolveCancelBtn">Cancel</button>
+      <button type="button" id="resolveOkBtn">Mark checked &amp; OK</button>
+      <button type="button" class="confirm" id="resolveMapBtn">Map to master</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PUBLIC_ID={{ batch.public_id|tojson }};
+let state={{ batch|tojson }};
+let pollTimer;
+let filterByDocument={};
+let sourceZoom=1;
+let pendingCatalog=null;
+let pendingResolution=null;
+
+const fields=[
+  "raw_item_text","canonical_name","strength","form","pack","batch",
+  "paid_qty","free_qty","unit_price","expiry","hsn"
+];
+const labels={
+  raw_item_text:"Raw OCR text",canonical_name:"Medicine name",strength:"Strength",
+  form:"Form",pack:"Pack",batch:"Batch",paid_qty:"Paid qty",free_qty:"Free",
+  unit_price:"Rate",expiry:"Expiry",hsn:"HSN"
+};
+const headerLabels={
+  vendor_name:"Vendor name",invoice_number:"Invoice number",invoice_date:"Invoice date",
+  gr_number:"GR number",po_number:"PO number",vendor_gstin:"Vendor GSTIN",
+  ocr_grand_total:"OCR-fetched total"
+};
+
+function badge(status){
+  if(status==="done")return '<span class="chip ok">Scan complete</span>';
+  if(status==="failed")return '<span class="chip bad">Scan failed</span>';
+  return '<span class="chip info">Scanning</span>';
+}
+
+function exact(line){
+  return Boolean(Number(line.catalog_exact_match)) || line.catalog_status==="exact";
+}
+
+function expiryNeedsAttention(line){
+  return ["expired","near_expiry"].includes(line.expiry_status);
+}
+
+function requiredLineErrors(line){
+  const errors=[];
+  const name=String(line.canonical_name??"").trim().toUpperCase();
+  if(["","NEW MEDICINE","UNKNOWN","N/A","NA","—","-"].includes(name))errors.push("Medicine name is required");
+  const paid=line.paid_qty, rate=line.unit_price;
+  if(paid===null||paid===undefined||String(paid).trim()==="")errors.push("Paid quantity is required");
+  else if(!Number.isFinite(Number(paid))||Number(paid)<0)errors.push("Paid quantity must be a non-negative number");
+  if(Number(paid)>0&&(rate===null||rate===undefined||String(rate).trim()===""))errors.push("Rate is required when paid quantity is greater than zero");
+  else if(rate!==null&&rate!==undefined&&String(rate).trim()!==""&&(!Number.isFinite(Number(rate))||Number(rate)<0))errors.push("Rate must be a non-negative number");
+  return errors;
+}
+
+function requiredDocumentErrors(doc){
+  const errors=[];
+  if(!String(doc.vendor_name||"").trim())errors.push("Vendor name is required");
+  if(!String(doc.invoice_date||"").trim())errors.push("Invoice date is required");
+  if(!doc.lines?.length)errors.push("At least one medicine row is required");
+  (doc.lines||[]).forEach((line,index)=>requiredLineErrors(line).forEach(error=>errors.push(`Line ${index+1}: ${error}`)));
+  return errors;
+}
+
+function batchValidationErrors(){
+  return state.documents.flatMap((doc,index)=>requiredDocumentErrors(doc).map(error=>`PDF ${index+1} · ${doc.filename}: ${error}`));
+}
+
+function visible(line,filter){
+  if(filter==="clean")return exact(line);
+  if(filter==="review")return Boolean(line.needs_review);
+  if(filter==="fuzzy")return line.catalog_status==="fuzzy";
+  if(filter==="catalog")return !exact(line);
+  if(filter==="expiry")return expiryNeedsAttention(line);
+  return true;
+}
+
+function summary(){
+  const ready=state.status==="maker_review";
+  const allLines=state.documents.flatMap(doc=>doc.lines||[]);
+  const exactCount=allLines.filter(exact).length;
+  const reviewCount=allLines.filter(line=>line.needs_review).length;
+  const missingCount=allLines.filter(line=>!exact(line)).length;
+  const expiryCount=allLines.filter(expiryNeedsAttention).length;
+  const validationErrors=batchValidationErrors();
+  const canSave=ready&&!validationErrors.length;
+  document.getElementById("summary").innerHTML=`
+    <section class="review-stats">
+      <div class="card review-stat"><div class="value">${allLines.length}</div><div class="label-text">Medicine lines captured</div></div>
+      <div class="card review-stat green"><div class="value">${exactCount}</div><div class="label-text">Exact medicine matches</div></div>
+      <div class="card review-stat amber"><div class="value">${reviewCount}</div><div class="label-text">Items needing review</div></div>
+      <div class="card review-stat red"><div class="value">${missingCount}</div><div class="label-text">Not exact in medicine list</div></div>
+      <div class="card review-stat purple"><div class="value">${expiryCount}</div><div class="label-text">Expiry attention</div></div>
+    </section>
+    <section class="card review-handoff">
+      <div>
+        <h2>${ready?"Maker review ready":"Batch progress"}</h2>
+        <p>${ready?(validationErrors.length?"Complete the required fields below before saving the batch.":"Double-click any medicine detail to edit it. Changes are saved immediately."):"PDFs are processed sequentially to preserve scanner accuracy."}</p>
+      </div>
+      <button class="btn primary save-batch" type="button" onclick="openSubmit()" ${canSave?"":"disabled"}>Save</button>
+    </section>
+    ${validationErrors.length?`<section class="validation-banner"><strong>Required fields need attention</strong><div>${validationErrors.slice(0,8).map(error=>`<span>• ${esc(error)}</span>`).join("")}</div>${validationErrors.length>8?`<small>and ${validationErrors.length-8} more…</small>`:""}</section>`:""}
+    <section class="card review-flow">
+      <div class="timeline">
+        <div class="step done">Uploaded</div>
+        <div class="step ${ready?"done":""}">Scanned</div>
+        <div class="step">Checker</div>
+        <div class="step">Central system</div>
+      </div>
+    </section>`;
+}
+
+function headerFields(doc,canEdit){
+  return Object.keys(headerLabels).map(field=>`
+    <label class="field">
+      <span class="label">${headerLabels[field]}</span>
+      <input class="input header-input" ${canEdit?"":"disabled"} ${["vendor_name","invoice_date"].includes(field)?"required":""}
+        data-doc="${doc.id}" data-header="${field}"
+        type="${field==="invoice_date"?"date":field==="ocr_grand_total"?"number":"text"}"
+        step="any" value="${esc(doc[field]??"")}">
+    </label>`).join("");
+}
+
+function displayValue(value){
+  return value===null||value===undefined||String(value).trim()===""?"—":String(value);
+}
+
+function editableCell(doc,line,field,extra=""){
+  return `<td class="review-editable ${extra} ${line.user_edited?"was-edited":""}"
+    data-doc="${doc.id}" data-line="${line.id}" data-field="${field}"
+    title="Double-click to edit ${labels[field]}">${esc(displayValue(line[field]))}</td>`;
+}
+
+function expiryCell(doc,line){
+  const status=line.expiry_status||"unknown";
+  const statusLabels={valid:"Valid",near_expiry:"Near expiry",expired:"Expired",unknown:"Unknown"};
+  const days=line.days_to_expiry;
+  let detail="";
+  if(days!==null&&days!==undefined){
+    const count=Math.abs(Number(days));
+    detail=` · ${count} day${count===1?"":"s"} ${Number(days)<0?"ago":"left"}`;
+  }
+  const content=`${esc(displayValue(line.expiry))}<span class="expiry-tag ${status}">${statusLabels[status]||"Unknown"}${detail}</span>`;
+  return `<td class="review-editable ${line.user_edited?"was-edited":""}"
+    data-doc="${doc.id}" data-line="${line.id}" data-field="expiry"
+    title="Double-click to edit Expiry">${content}</td>`;
+}
+
+function catalogCell(line){
+  if(exact(line)){
+    return `<span class="chip ok">Exact match</span><span class="catalog-detail good">${esc(line.catalog_name||line.canonical_name||"")}</span>`;
+  }
+  if(line.catalog_status==="fuzzy"){
+    return `<span class="chip bad">Possible scan error</span><span class="catalog-detail">Suggested: ${esc(line.catalog_name||"Unknown")} (${num(line.catalog_match_score)}%)</span>${resolveButton(line)}`;
+  }
+  if(line.catalog_status==="attribute_mismatch"){
+    return `<span class="chip bad">Details differ</span><span class="catalog-detail">Name exists, but strength or form differs</span>${resolveButton(line)}`;
+  }
+  return `<span class="not-found-text">Not found</span><button type="button" class="catalog-add" data-catalog-line="${line.id}" title="Add medicine to master list" aria-label="Add medicine to master list">+</button>${resolveButton(line)}`;
+}
+
+function resolveButton(line){
+  return line.needs_review?`<button type="button" class="resolve-line" data-resolve-line="${line.id}">Resolve</button>`:"";
+}
+
+function statusCell(line,requiredErrors=[]){
+  const parts=[];
+  if(line.user_edited)parts.push('<span class="chip info">Edited</span>');
+  if(line.scheme_flag)parts.push('<span class="chip warn">Free goods</span>');
+  if(line.needs_review)parts.push('<span class="chip warn">Review</span>');
+  else if(line.catalog_status==="maker_confirmed")parts.push('<span class="chip ok">Maker confirmed</span>');
+  if(requiredErrors.length)parts.push(`<span class="chip bad">Incomplete</span><span class="required-detail">${esc(requiredErrors.join(" · "))}</span>`);
+  if(!parts.length)parts.push('<span class="chip ok">Ready</span>');
+  return `<div class="status-stack">${parts.join("")}</div>`;
+}
+
+function rowsFor(doc){
+  const filter=filterByDocument[doc.id]||"all";
+  const lines=(doc.lines||[]).filter(line=>visible(line,filter));
+  if(!lines.length){
+    return '<tr><td colspan="18" class="empty">No medicine rows match this view.</td></tr>';
+  }
+  return lines.map((line,index)=>{
+    const match=Number(line.match_confidence);
+    const highlight=!exact(line) && (!Number.isFinite(match)||match<100);
+    const requiredErrors=requiredLineErrors(line);
+    return `<tr class="${[highlight?"catalog-mismatch":"",requiredErrors.length?"invalid-line":""].filter(Boolean).join(" ")}">
+      <td class="sticky-page"><button class="source-btn" type="button" data-source-line="${line.id}">Page ${line.page_no||1}</button></td>
+      <td class="sticky-vendor strong">${esc(doc.vendor_name||"—")}</td>
+      ${editableCell(doc,line,"raw_item_text","raw sticky-raw")}
+      ${editableCell(doc,line,"canonical_name","canonical")}
+      ${editableCell(doc,line,"strength")}
+      ${editableCell(doc,line,"form")}
+      ${editableCell(doc,line,"pack")}
+      ${editableCell(doc,line,"batch")}
+      ${editableCell(doc,line,"paid_qty")}
+      ${editableCell(doc,line,"free_qty")}
+      ${editableCell(doc,line,"unit_price")}
+      ${expiryCell(doc,line)}
+      ${editableCell(doc,line,"hsn")}
+      <td>${Number.isFinite(match)?num(match):"—"}</td>
+      <td class="catalog-match-cell">${catalogCell(line)}</td>
+      <td>${statusCell(line,requiredErrors)}</td>
+      <td class="row-actions">
+        <button class="row-action duplicate" type="button" data-duplicate-line="${line.id}" title="Duplicate row">⧉</button>
+        <button class="row-action delete" type="button" data-delete-line="${line.id}" title="Delete row">×</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+function filterTabs(doc){
+  const active=filterByDocument[doc.id]||"all";
+  const items=[
+    ["all","All items"],["clean","Exact matches"],["review","Needs review"],
+    ["fuzzy","Possible scan errors"],["catalog","Not in medicine list"],
+    ["expiry","Expiry attention"]
+  ];
+  return `<div class="review-tabs">${items.map(([key,text])=>
+    `<button type="button" class="review-tab ${active===key?"active":""}" data-doc-filter="${doc.id}" data-filter="${key}">${text}</button>`
+  ).join("")}</div>`;
+}
+
+function totals(doc){
+  const t=doc.totals||{};
+  return `<div class="total-strip">
+    <div class="total-box"><small>OCR-fetched invoice total</small><b>${money(t.ocr_total)}</b></div>
+    <div class="total-box ${t.totals_match?"match":"mismatch"}"><small>Calculated total · paid qty × rate</small><b>${money(t.computed_total)}</b>
+      <div class="hint">${t.totals_match?"Matches OCR total":t.missing_rate_lines?`${t.missing_rate_lines} rate${t.missing_rate_lines===1?"":"s"} missing`:"Tax, discounts or rounding may explain a variance"}</div>
+    </div>
+  </div>`;
+}
+
+function docCard(doc,index){
+  const canEdit=state.status==="maker_review"&&doc.scan_status==="done";
+  if(doc.scan_status!=="done"){
+    return `<section class="card document-card">
+      <div class="doc-title"><div><h3>PDF ${index+1} · ${esc(doc.filename)}</h3><p>${esc(doc.scan_message||"Queued for scanning")}</p></div>${badge(doc.scan_status)}</div>
+      ${doc.scan_status!=="failed"?`<div class="progress-track" style="margin-top:16px"><div class="progress-fill" style="width:${doc.scan_progress||0}%"></div></div>`:""}
+    </section>`;
+  }
+  const lineCount=(doc.lines||[]).length;
+  const exactCount=(doc.lines||[]).filter(exact).length;
+  const reviewCount=(doc.lines||[]).filter(line=>line.needs_review).length;
+  return `<section class="card document-card" id="doc-${doc.id}">
+    <div class="doc-title">
+      <div>
+        <div class="pdf-kicker">PDF ${index+1}</div>
+        <h3>${esc(doc.filename)}</h3>
+        <p>${lineCount} medicine lines · ${exactCount} exact · ${reviewCount} need review</p>
+      </div>
+      <div class="doc-actions">${badge(doc.scan_status)}${canEdit?`<button type="button" class="tool-btn remove-pdf" data-remove-document="${doc.id}">Remove PDF</button>`:""}</div>
+    </div>
+    ${doc.duplicate_warning?`<div class="banner warn" style="margin-top:14px">${esc(doc.duplicate_warning)}</div>`:""}
+    <div class="header-grid">${headerFields(doc,canEdit)}</div>
+    <div class="review-table-head">
+      <div>
+        <h4>Medicine list</h4>
+        <p>Double-click Raw OCR text or any medicine detail to edit it.</p>
+      </div>
+      ${filterTabs(doc)}
+    </div>
+    <div class="row-tools">
+      <button class="tool-btn primary" type="button" data-add="${doc.id}" ${canEdit?"":"disabled"}>＋ Add medicine row</button>
+      <span class="review-legend"><i class="legend-red"></i> Highlighted rows need medicine-list review</span>
+    </div>
+    <div class="medicine-table-wrap">
+      <table class="medicine-review-table">
+        <colgroup>
+          <col style="width:78px"><col style="width:190px"><col style="width:220px"><col style="width:205px">
+          <col style="width:95px"><col style="width:100px"><col style="width:95px"><col style="width:115px">
+          <col style="width:78px"><col style="width:72px"><col style="width:95px">
+          <col style="width:140px"><col style="width:105px"><col style="width:78px"><col style="width:180px">
+          <col style="width:110px"><col style="width:86px">
+        </colgroup>
+        <thead><tr>
+          <th>Page</th><th>Vendor</th><th>Raw OCR text</th><th>Medicine name</th>
+          <th>Strength</th><th>Form</th><th>Pack</th><th>Batch</th>
+          <th>Paid</th><th>Free</th><th>Rate</th>
+          <th>Expiry</th><th>HSN</th><th>Match %</th><th>List match</th>
+          <th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${rowsFor(doc)}</tbody>
+      </table>
+    </div>
+    <div class="filtered-count" data-filter-count="${doc.id}"></div>
+    ${totals(doc)}
+  </section>`;
+}
+
+function render(){
+  const progress=document.getElementById("progressCard");
+  if(state.status==="maker_review"||["submitted","approved","rejected"].includes(state.status)){
+    progress.style.display="none";
+  }else{
+    progress.style.display="block";
+    document.getElementById("progressFill").style.width=`${state.progress||0}%`;
+    document.getElementById("progressValue").textContent=`${state.progress||0}%`;
+    const active=state.documents.find(doc=>["queued","processing"].includes(doc.scan_status));
+    document.getElementById("progressText").textContent=active?`${active.filename} · ${active.scan_message||"Processing"}`:"Finalizing results…";
+  }
+  summary();
+  document.getElementById("documents").innerHTML=state.documents.map(docCard).join("");
+  bind();
+}
+
+function findLine(docId,lineId){
+  const doc=state.documents.find(item=>Number(item.id)===Number(docId));
+  const line=doc?.lines?.find(item=>Number(item.id)===Number(lineId));
+  return {doc,line};
+}
+
+function bind(){
+  document.querySelectorAll(".review-editable").forEach(cell=>{
+    cell.ondblclick=()=>beginCellEdit(cell);
+  });
+  document.querySelectorAll(".header-input").forEach(input=>{
+    input.onchange=async()=>{
+      try{
+        const data=await api(`/api/batches/${PUBLIC_ID}/documents/${input.dataset.doc}/header`,{
+          method:"PATCH",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({[input.dataset.header]:input.value})
+        });
+        state=data.batch;render();toast("Invoice details saved");
+      }catch(error){toast(error.message,true)}
+    };
+  });
+  document.querySelectorAll("[data-doc-filter]").forEach(button=>{
+    button.onclick=()=>{
+      const docId=button.dataset.docFilter;
+      const section=document.getElementById(`doc-${docId}`);
+      const doc=state.documents.find(item=>Number(item.id)===Number(docId));
+      if(!section||!doc)return;
+      filterByDocument[docId]=button.dataset.filter;
+      section.querySelectorAll("[data-doc-filter]").forEach(item=>
+        item.classList.toggle("active",item.dataset.filter===button.dataset.filter)
+      );
+      section.querySelector("tbody").innerHTML=rowsFor(doc);
+      bind();
+    };
+  });
+  document.querySelectorAll("[data-add]").forEach(button=>{
+    button.onclick=async()=>{
+      try{
+        const data=await api(`/api/batches/${PUBLIC_ID}/documents/${button.dataset.add}/lines`,{method:"POST"});
+        state=data.batch;render();toast("Medicine row added");
+      }catch(error){toast(error.message,true)}
+    };
+  });
+  document.querySelectorAll("[data-delete-line]").forEach(button=>{
+    button.onclick=async()=>{
+      const row=button.closest("tr");
+      const docId=row.querySelector("[data-doc]")?.dataset.doc;
+      if(!confirm("Delete this medicine row?"))return;
+      try{
+        const data=await api(`/api/batches/${PUBLIC_ID}/documents/${docId}/lines/${button.dataset.deleteLine}`,{method:"DELETE"});
+        state=data.batch;render();toast("Medicine row deleted");
+      }catch(error){toast(error.message,true)}
+    };
+  });
+  document.querySelectorAll("[data-duplicate-line]").forEach(button=>{
+    button.onclick=async()=>{
+      const row=button.closest("tr");
+      const docId=row.querySelector("[data-doc]")?.dataset.doc;
+      try{
+        const data=await api(`/api/batches/${PUBLIC_ID}/documents/${docId}/lines/${button.dataset.duplicateLine}/duplicate`,{method:"POST"});
+        state=data.batch;render();toast("Medicine row duplicated");
+      }catch(error){toast(error.message,true)}
+    };
+  });
+  document.querySelectorAll("[data-source-line]").forEach(button=>{
+    button.onclick=()=>{
+      const docId=button.closest("tr").querySelector("[data-doc]")?.dataset.doc;
+      const {doc,line}=findLine(docId,button.dataset.sourceLine);
+      if(doc&&line)openSource(doc,line);
+    };
+  });
+  document.querySelectorAll("[data-catalog-line]").forEach(button=>{
+    button.onclick=()=>{
+      const docId=button.closest("tr").querySelector("[data-doc]")?.dataset.doc;
+      const {doc,line}=findLine(docId,button.dataset.catalogLine);
+      if(doc&&line)openCatalogAdd(doc,line);
+    };
+  });
+  document.querySelectorAll("[data-resolve-line]").forEach(button=>{
+    button.onclick=()=>{
+      const docId=button.closest("tr").querySelector("[data-doc]")?.dataset.doc;
+      const {doc,line}=findLine(docId,button.dataset.resolveLine);
+      if(doc&&line)openResolution(doc,line);
+    };
+  });
+  document.querySelectorAll("[data-remove-document]").forEach(button=>{
+    button.onclick=async()=>{
+      const doc=state.documents.find(item=>Number(item.id)===Number(button.dataset.removeDocument));
+      if(!doc||!confirm(`Remove ${doc.filename} from this batch? Its scan will not be saved or submitted.`))return;
+      try{
+        const data=await api(`/api/batches/${PUBLIC_ID}/documents/${doc.id}`,{method:"DELETE"});
+        state=data.batch;render();toast("PDF removed from this batch");
+      }catch(error){toast(error.message,true)}
+    };
+  });
+}
+
+function beginCellEdit(cell){
+  if(state.status!=="maker_review"||cell.querySelector("input"))return;
+  const docId=cell.dataset.doc,lineId=cell.dataset.line,field=cell.dataset.field;
+  const {line}=findLine(docId,lineId);
+  if(!line)return;
+  const original=line[field]??"";
+  const oldMarkup=cell.innerHTML;
+  const input=document.createElement("input");
+  input.className="inline-editor";
+  input.value=original;
+  if(["paid_qty","free_qty","unit_price","amount"].includes(field))input.inputMode="decimal";
+  let list,timer;
+  if(field==="canonical_name"){
+    list=document.createElement("datalist");
+    list.id=`medicine-suggestions-${lineId}-${Date.now()}`;
+    document.body.appendChild(list);
+    input.setAttribute("list",list.id);
+    const suggest=()=>{
+      clearTimeout(timer);
+      timer=setTimeout(async()=>{
+        const query=input.value.trim();
+        if(query.length<2){list.innerHTML="";return}
+        try{
+          const data=await api(`/api/catalog/suggest?q=${encodeURIComponent(query)}&limit=10`);
+          list.innerHTML=(data.suggestions||[]).map(item=>
+            `<option value="${esc(item.canonical_name)}">${esc([item.catalog_name,item.strength,item.form].filter(Boolean).join(" · "))}</option>`
+          ).join("");
+        }catch(_error){list.innerHTML=""}
+      },140);
+    };
+    input.addEventListener("input",suggest);suggest();
+  }
+  cell.innerHTML="";cell.appendChild(input);input.focus();input.select();
+  let finished=false;
+  const cancel=()=>{
+    if(finished)return;
+    finished=true;if(list)list.remove();cell.innerHTML=oldMarkup;
+  };
+  const save=async()=>{
+    if(finished)return;
+    const value=input.value.trim().replace(/\s+/g," ");
+    if(field==="canonical_name"&&!value){toast("Medicine name cannot be blank.",true);input.focus();return}
+    if(value===String(original)){cancel();return}
+    finished=true;input.disabled=true;if(list)list.remove();
+    try{
+      const data=await api(`/api/batches/${PUBLIC_ID}/documents/${docId}/lines/${lineId}`,{
+        method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({field,value})
+      });
+      state=data.batch;render();toast(`${labels[field]} updated`);
+    }catch(error){cell.innerHTML=oldMarkup;toast(error.message,true)}
+  };
+  input.onkeydown=event=>{
+    if(event.key==="Enter"){event.preventDefault();save()}
+    if(event.key==="Escape"){event.preventDefault();cancel()}
+  };
+  input.onblur=save;
+}
+
+function openSource(doc,line){
+  sourceZoom=1;
+  const panel=document.getElementById("sourcePanel");
+  const image=document.getElementById("sourceImage");
+  const canvas=document.getElementById("sourceCanvas");
+  const highlight=document.getElementById("sourceHighlight");
+  document.getElementById("sourceTitle").textContent=`Source review · Page ${line.page_no||1}`;
+  document.getElementById("sourceSubtitle").textContent=line.raw_item_text||line.canonical_name||"Medicine row";
+  canvas.style.width="100%";document.getElementById("zoomLabel").textContent="100%";
+  highlight.style.display="none";
+  image.onload=()=>{
+    const box=line.source_bbox;
+    if(Array.isArray(box)&&box.length===4&&image.naturalWidth&&image.naturalHeight){
+      highlight.style.left=(box[0]/image.naturalWidth*100)+"%";
+      highlight.style.top=(box[1]/image.naturalHeight*100)+"%";
+      highlight.style.width=((box[2]-box[0])/image.naturalWidth*100)+"%";
+      highlight.style.height=((box[3]-box[1])/image.naturalHeight*100)+"%";
+      highlight.style.display="block";
+    }
+  };
+  image.src=`${BASE}/source/${PUBLIC_ID}/${doc.id}/${line.page_no||1}`;
+  panel.classList.add("open");document.body.style.overflow="hidden";
+}
+
+function closeSource(){
+  document.getElementById("sourcePanel").classList.remove("open");
+  document.body.style.overflow="";
+}
+
+function changeSourceZoom(delta){
+  sourceZoom=Math.max(.6,Math.min(2.5,sourceZoom+delta));
+  document.getElementById("sourceCanvas").style.width=(sourceZoom*100)+"%";
+  document.getElementById("zoomLabel").textContent=Math.round(sourceZoom*100)+"%";
+}
+
+function openCatalogAdd(doc,line){
+  pendingCatalog={doc,line};
+  const val=value=>esc(displayValue(value));
+  document.getElementById("catalogPreview").innerHTML=`
+    <div class="catalog-preview-grid">
+      <div class="catalog-preview-item wide"><span>Medicine name</span><b>${val(line.canonical_name||line.raw_item_text)}</b></div>
+      <div class="catalog-preview-item"><span>Strength</span><b>${val(line.strength)}</b></div>
+      <div class="catalog-preview-item"><span>Form</span><b>${val(line.form)}</b></div>
+      <div class="catalog-preview-item"><span>Pack</span><b>${val(line.pack)}</b></div>
+      <div class="catalog-preview-item"><span>HSN</span><b>${val(line.hsn)}</b></div>
+      <div class="catalog-preview-item wide"><span>Raw OCR text</span><b>${val(line.raw_item_text)}</b></div>
+    </div>`;
+  const confirm=document.getElementById("catalogConfirmBtn");
+  confirm.disabled=false;confirm.textContent="OK, add medicine";
+  document.getElementById("catalogPanel").classList.add("open");
+  document.body.style.overflow="hidden";
+}
+
+function closeCatalogAdd(){
+  pendingCatalog=null;
+  document.getElementById("catalogPanel").classList.remove("open");
+  if(!document.getElementById("sourcePanel").classList.contains("open"))document.body.style.overflow="";
+}
+
+async function confirmCatalogAdd(){
+  if(!pendingCatalog)return;
+  const {doc,line}=pendingCatalog;
+  const button=document.getElementById("catalogConfirmBtn");
+  button.disabled=true;button.textContent="Adding…";
+  try{
+    const data=await api(`/api/batches/${PUBLIC_ID}/documents/${doc.id}/lines/${line.id}/catalog`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:line.canonical_name||line.raw_item_text,strength:line.strength,form:line.form,pack:line.pack})
+    });
+    state=data.batch;closeCatalogAdd();render();
+    toast(data.addition?.message||"Medicine added to the master list");
+  }catch(error){
+    button.disabled=false;button.textContent="OK, add medicine";toast(error.message,true);
+  }
+}
+
+function openResolution(doc,line){
+  pendingResolution={doc,line};
+  document.getElementById("resolveRaw").textContent=line.raw_item_text||line.canonical_name||"—";
+  const input=document.getElementById("resolveName");
+  input.value=line.catalog_name||"";
+  document.getElementById("resolvePanel").classList.add("open");
+  document.body.style.overflow="hidden";
+  setTimeout(()=>input.focus(),0);
+}
+function closeResolution(){
+  pendingResolution=null;
+  document.getElementById("resolvePanel").classList.remove("open");
+  if(!document.getElementById("sourcePanel").classList.contains("open")&&!document.getElementById("catalogPanel").classList.contains("open"))document.body.style.overflow="";
+}
+async function resolvePending(resolution){
+  if(!pendingResolution)return;
+  const {doc,line}=pendingResolution;
+  const input=document.getElementById("resolveName");
+  const name=input.value.trim();
+  if(resolution==="map"&&!name){toast("Choose a medicine from the master list first.",true);input.focus();return}
+  const button=document.getElementById(resolution==="map"?"resolveMapBtn":"resolveOkBtn");
+  button.disabled=true;
+  try{
+    const data=await api(`/api/batches/${PUBLIC_ID}/documents/${doc.id}/lines/${line.id}/resolve`,{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({resolution,name})
+    });
+    state=data.batch;closeResolution();render();toast(resolution==="map"?"Medicine mapped to the master list":"Medicine review marked as checked");
+  }catch(error){toast(error.message,true);button.disabled=false}
+}
+let resolutionTimer;
+document.getElementById("resolveName").oninput=()=>{
+  clearTimeout(resolutionTimer);
+  resolutionTimer=setTimeout(async()=>{
+    const input=document.getElementById("resolveName"),list=document.getElementById("resolveSuggestions"),query=input.value.trim();
+    if(query.length<2){list.innerHTML="";return}
+    try{const data=await api(`/api/catalog/suggest?q=${encodeURIComponent(query)}&limit=12`);list.innerHTML=(data.suggestions||[]).map(item=>`<option value="${esc(item.canonical_name)}">${esc([item.catalog_name,item.strength,item.form].filter(Boolean).join(" · "))}</option>`).join("")}catch(_error){list.innerHTML=""}
+  },120);
+};
+
+function openSubmit(){
+  document.getElementById("submitPreview").innerHTML=`
+    <div class="grid two">
+      <div class="total-box"><small>Invoices</small><b>${state.documents.length}</b></div>
+      <div class="total-box"><small>Medicine lines</small><b>${state.line_count}</b></div>
+      <div class="total-box"><small>OCR value</small><b>${money(state.ocr_total)}</b></div>
+      <div class="total-box"><small>Needs attention</small><b>${state.review_count}</b></div>
+    </div>`;
+  document.getElementById("submitModal").classList.add("open");
+}
+function closeSubmit(){document.getElementById("submitModal").classList.remove("open")}
+
+document.getElementById("confirmSubmit").onclick=async()=>{
+  const button=document.getElementById("confirmSubmit");
+  button.disabled=true;
+  try{
+    const data=await api(`/api/batches/${PUBLIC_ID}/submit`,{method:"POST"});
+    toast(data.message);setTimeout(()=>location.href=BASE+"/maker",900);
+  }catch(error){toast(error.message,true);button.disabled=false}
+};
+document.getElementById("sourceCloseBtn").onclick=closeSource;
+document.getElementById("zoomInBtn").onclick=()=>changeSourceZoom(.2);
+document.getElementById("zoomOutBtn").onclick=()=>changeSourceZoom(-.2);
+document.getElementById("sourcePanel").onclick=event=>{if(event.target.id==="sourcePanel")closeSource()};
+document.getElementById("catalogCancelBtn").onclick=closeCatalogAdd;
+document.getElementById("catalogConfirmBtn").onclick=confirmCatalogAdd;
+document.getElementById("catalogPanel").onclick=event=>{if(event.target.id==="catalogPanel")closeCatalogAdd()};
+document.getElementById("resolveCancelBtn").onclick=closeResolution;
+document.getElementById("resolveOkBtn").onclick=()=>resolvePending("ok");
+document.getElementById("resolveMapBtn").onclick=()=>resolvePending("map");
+document.getElementById("resolvePanel").onclick=event=>{if(event.target.id==="resolvePanel")closeResolution()};
+document.addEventListener("keydown",event=>{
+  if(event.key==="Escape"&&document.getElementById("sourcePanel").classList.contains("open"))closeSource();
+  if(event.key==="Escape"&&document.getElementById("catalogPanel").classList.contains("open"))closeCatalogAdd();
+  if(event.key==="Escape"&&document.getElementById("resolvePanel").classList.contains("open"))closeResolution();
+});
+
+async function poll(){
+  if(state.status==="processing"){
+    try{const data=await api(`/api/batches/${PUBLIC_ID}`);state=data.batch;render()}
+    catch(error){toast(error.message,true)}
+    pollTimer=setTimeout(poll,1200);
+  }
+}
+render();poll();
+</script>
+{% endblock %}

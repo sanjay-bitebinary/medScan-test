@@ -1,0 +1,30 @@
+services:
+  app-v3:
+    build:
+      context: .
+    container_name: medscan-v3-app
+    restart: unless-stopped
+    environment:
+      V3_BASE_PATH: /v3
+      V3_DATA_DIR: /app/runtime/v3-data
+      MASTER_DATA_DIR: /app/runtime/v3-master
+      DOTS_OCR_CACHE_DIR: /app/runtime/v3-cache
+      DOTS_OCR_BASE_URL: http://dots-ocr:8000/v1
+      DOTS_OCR_TIMEOUT: "900"
+      V3_SECURE_COOKIE: "1"
+      MEDSCAN_BOOTSTRAP_MAKER_PASSWORD: ${MEDSCAN_MAKER_PASSWORD:?Set MEDSCAN_MAKER_PASSWORD}
+      MEDSCAN_BOOTSTRAP_CHECKER_PASSWORD: ${MEDSCAN_CHECKER_PASSWORD:?Set MEDSCAN_CHECKER_PASSWORD}
+      MEDSCAN_BOOTSTRAP_ADMIN_PASSWORD: ${MEDSCAN_ADMIN_PASSWORD:?Set MEDSCAN_ADMIN_PASSWORD}
+    volumes:
+      - ./runtime/v3-data:/app/runtime/v3-data
+      - ./runtime/v3-master:/app/runtime/v3-master
+      - ./runtime/v3-cache:/app/runtime/v3-cache
+    networks:
+      medscan_shared:
+        aliases:
+          - medscan-v3-app
+
+networks:
+  medscan_shared:
+    external: true
+    name: dosocr-offline_offline

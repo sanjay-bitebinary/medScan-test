@@ -1,0 +1,13 @@
+.cache
+.codex-run
+.venv
+__pycache__
+*.pyc
+jobs
+tests
+validation_color
+validation_output
+page*-response.json
+.codex-*.out
+.codex-*.err
+server

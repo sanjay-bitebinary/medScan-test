@@ -1,0 +1,14 @@
+# Local app dependencies. The dots.ocr model itself runs on the GPU server.
+Flask>=3.0,<4
+gunicorn>=23,<24
+requests>=2.31,<3
+python-dateutil>=2.9,<3
+opencv-python-headless>=4.8,<5
+numpy>=1.24,<3
+pandas>=2.0,<3
+openpyxl>=3.1,<4
+xlrd>=2.0,<3
+xlwt>=1.3,<2
+rapidfuzz>=3.0,<4
+pypdf>=5.0,<7
+pdfplumber>=0.11,<1

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Past activity · MedScan{% endblock %}
+{% block page_title %}Past activity{% endblock %}
+{% block page_subtitle %}A role-appropriate trail of work already completed in MedScan{% endblock %}
+{% block content %}
+<section class="card"><div class="section-head"><div><h2>Your completed work</h2><p>Each batch remains traceable to its PDFs, handoff and approval state.</p></div><button class="btn" onclick="loadHistory()">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Files</th><th>Maker</th><th>Checker</th><th>Invoices</th><th>Lines</th><th>Flags</th><th>OCR value</th><th>Latest activity</th><th></th></tr></thead><tbody id="historyRows"><tr><td colspan="10" class="empty">Loading activity…</td></tr></tbody></table></div></section>
+{% endblock %}
+{% block scripts %}<script>
+function statusClass(s){return s==="approved"?"ok":s==="rejected"?"bad":s==="submitted"?"warn":"info"}
+async function loadHistory(){try{const d=await api("/api/history"),items=d.items||[];document.getElementById("historyRows").innerHTML=items.map(x=>{const link={{ current_user.role|tojson }}==="maker"?`${BASE}/maker/batch/${x.public_id}`:{{ current_user.role|tojson }}==="checker"?`${BASE}/checker/batch/${x.public_id}`:"";return `<tr><td><span class="chip ${statusClass(x.status)}">${esc(x.status)}</span></td><td class="wrap strong">${esc(x.filenames||"—")}</td><td>${esc(x.maker_name||"—")}</td><td>${esc(x.checker_name||"—")}</td><td>${num(x.document_count)}</td><td>${num(x.line_count)}</td><td>${num(x.review_count)}</td><td>${money(x.ocr_total)}</td><td>${new Date(x.reviewed_at||x.submitted_at||x.created_at).toLocaleString("en-IN")}</td><td>${link?`<a class="btn source" href="${link}">Open</a>`:"—"}</td></tr>`}).join("")||'<tr><td colspan="10" class="empty">No completed activity yet.</td></tr>'}catch(e){toast(e.message,true)}}loadHistory();
+</script>{% endblock %}

@@ -1,0 +1,14 @@
+[Unit]
+Description=MedScan V3 private GPU reverse tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=MEDSCAN_PUBLIC_HOST=PUBLIC_SERVER_IP
+ExecStart=/home/vinoy/Vinoy/medscan-reverse-tunnel.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
